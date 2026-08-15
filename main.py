@@ -1,67 +1,117 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import os
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+
+load_dotenv()
+
+api_key = os.getenv("OPENAI_API_KEY")
+model_name = os.getenv("OPENAI_MODEL", "gpt-5.6")
+
+client = OpenAI(api_key=api_key) if api_key else None
 
 app = FastAPI(
     title="Unity AI Assistant", 
     description="A simple AI assistant for Unity developers", 
-    version="1.0.0"
+    version="0.2.0"
     )
 
 class UnityIssue(BaseModel):
-    title: str
-    description: str
-    platform: str
-    unity_version: str | None = None
-
+    title: str = Field(
+        min_length=3, 
+        max_length=150, 
+        example=["Webcam feed appears upside down"],
+        )
+    description: str = Field(
+        min_length=10,
+        example=["The webcam feed is appearing upside down on my Android device."]
+    )
+    platform: str = Field(
+        min_length=2,
+        max_length=100,
+        example=["iOS"]
+    )
+    unity_version: str | None = Field(
+        default=None,
+        example=["Optional Unity C# code related to the issue"],
+    )
+    code: str | None = Field(
+        default=None,
+        description="Optional Unity C# code related to the issue",
+        example=["public void Start() { }"]
+    )
 
 @app.get("/")
 def home():
     return {
-        "message": "Welcome to the Unity AI Assistant API!",
-        "status": "running"
+        "application": "Welcome to the Unity AI Assistant API!",
+        "version": "0.2.0",
+        "status": "running",
+        "ai_configured": client is not None,
     }
 
 @app.post("/analyze")
 def analyze_issue(issue: UnityIssue):
-    description = issue.description.lower()
-    possible_causes = []
-    recommended_actions = []
+    if client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="OpenAI API key is not configured. Please set the OPENAI_API_KEY environment variable."
+        )
 
-    if "upside down" in description:
-        possible_causes.append(
-            "WebcamTexture.videoVerticallyMirrored is true, causing the video feed to appear upside down."
-            )
-        recommended_actions.append(
-            "Apply a vertical UI scale based on videoVerticallyMirrored."
-            )
+    prompt = f"""
+You are an AI assistant for Unity developers. Analyze the following issue and provide possible causes and recommended
 
-        if "mirror" in description:
-            possible_causes.append(
-                "The front camera or RawImage transform may apply horizontal mirroring."
-            )
-            recommended_actions.append(
-                "Check RawImage uvRect and localScale.x before applying another flip."
-            )
+    Title: 
+    {issue.title}
 
-        if "stretch" in description:
-            possible_causes.append(
-                "The camera aspect ratio does not match the RawImage container."
-            )
-            recommended_actions.append(
-                "Update AspectRatioFitter.aspectRatio using video width and height."
-            )
+    Description: 
+    {issue.description}
 
-        if not possible_causes:
-            possible_causes.append("No known pattern was detected.")
-            recommended_actions.append(
-                "Collect the Unity logs, platform, and reproduction steps."
-            )    
-            
-    return {
-        "success": True,
-        "input": issue,
-        "analysis": {
-            "possible_causes": possible_causes,
-            "recommended_actions": recommended_actions
-        },
-    }
+    Platform: 
+    {issue.platform}
+
+    Unity Version: 
+    {issue.unity_version or "Not provided"}
+    
+    Related Code: 
+    {issue.code or "Not provided"}
+
+    Provide the answer using these sections:
+    1. Most likely cause
+    2. Technical explanation
+    3. Recommended actions
+    4. Example Unity C# code (if applicable)
+    5. Additional checks
+
+    Important requirements:
+    - Do not invent Unity APIs.
+    - Clearly state when information is insufficient to provide a definitive answer.
+    - Consider platform-specific behavior.
+    - Keep the explanation concise and practical.
+"""
+
+    try:
+        response = client.responses.create(
+            model=model_name,
+            instructions=(
+                "You are a senior Unity engineer specializing in "
+                "Unity 6, mobile development, iOS, Android, camera, "
+                "audio, Addressables, performance, and debugging."
+            ),
+            input=prompt,
+        )
+
+        return {
+            "success": True,
+            "model": model_name,
+            "issue": issue.model_dump(),
+            "analysis": response.output_text,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing the issue: {str(e)}"
+        ) from e
